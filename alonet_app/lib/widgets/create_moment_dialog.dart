@@ -6,7 +6,7 @@ import '../core/colors/colors.dart';
 /// Allows users to select time, emoji, and add optional notes
 class CreateMomentDialog extends StatefulWidget {
   final String? userTimezone;
-  final Function(Map<String, dynamic>) onMomentCreated;
+  final Function(String event, String? note, DateTime momentTime, String timezone) onMomentCreated;
 
   const CreateMomentDialog({
     super.key,
@@ -78,17 +78,15 @@ class _CreateMomentDialogState extends State<CreateMomentDialog> {
 
   /// Create moment and close dialog
   void _createMoment() {
-    // Convert DateTime to timestamp
-    final timestamp = _selectedDateTime.millisecondsSinceEpoch ~/ 1000;
-    
-    final moment = {
-      'time': timestamp,
-      'event': _selectedEmoji,
-      'note': _noteController.text.trim(),
-      'create_time': DateTime.now().millisecondsSinceEpoch ~/ 1000,
-    };
+    final userTimezone = widget.userTimezone ?? 'Asia/Dubai';
+    final note = _noteController.text.trim();
 
-    widget.onMomentCreated(moment);
+    widget.onMomentCreated(
+      _selectedEmoji,
+      note.isEmpty ? null : note,
+      _selectedDateTime,
+      userTimezone,
+    );
     Navigator.of(context).pop();
   }
 

@@ -8,14 +8,14 @@ CREATE TABLE IF NOT EXISTS partner_relationships (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
   accepted_at TIMESTAMP WITH TIME ZONE,
-  
+
   -- Ensure a user can only have one active partner relationship
   CONSTRAINT unique_active_partnership UNIQUE (user_id),
   -- Prevent self-partnership
   CONSTRAINT no_self_partnership CHECK (user_id != partner_id)
 );
 
--- Create indexes for efficient queries
+-- Indexes
 CREATE INDEX idx_partner_relationships_user_id ON partner_relationships(user_id);
 CREATE INDEX idx_partner_relationships_partner_id ON partner_relationships(partner_id);
 CREATE INDEX idx_partner_relationships_status ON partner_relationships(status);
@@ -25,17 +25,17 @@ CREATE INDEX idx_partner_relationships_invitation_code ON partner_relationships(
 CREATE TABLE IF NOT EXISTS moments (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
-  event TEXT NOT NULL, -- Emoji representing the moment
-  note TEXT, -- Optional note about the moment
-  moment_time TIMESTAMP WITH TIME ZONE NOT NULL, -- When the moment occurred
-  timezone TEXT NOT NULL, -- User's timezone when creating the moment
-  reaction TEXT, -- Partner's reaction emoji
-  reacted_at TIMESTAMP WITH TIME ZONE, -- When partner reacted
+  event TEXT NOT NULL,
+  note TEXT,
+  moment_time TIMESTAMP WITH TIME ZONE NOT NULL,
+  timezone TEXT NOT NULL,
+  reaction TEXT,
+  reacted_at TIMESTAMP WITH TIME ZONE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
 );
 
--- Create indexes for efficient queries
+-- Indexes
 CREATE INDEX idx_moments_user_id ON moments(user_id);
 CREATE INDEX idx_moments_moment_time ON moments(moment_time);
 CREATE INDEX idx_moments_created_at ON moments(created_at);
@@ -55,20 +55,17 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- RLS Policies for partner_relationships
+-- Enable RLS
 ALTER TABLE partner_relationships ENABLE ROW LEVEL SECURITY;
+ALTER TABLE moments ENABLE ROW LEVEL SECURITY;
 
--- Users can view their own partnership records
+-- Policies for partner_relationships
 CREATE POLICY "Users can view own partnerships" ON partner_relationships
-  FOR SELECT USING (
-    auth.uid() = user_id OR auth.uid() = partner_id
-  );
+  FOR SELECT USING (auth.uid() = user_id OR auth.uid() = partner_id);
 
--- Users can create partnership invitations
 CREATE POLICY "Users can create partnerships" ON partner_relationships
   FOR INSERT WITH CHECK (
     auth.uid() = user_id AND
-    -- Ensure user doesn't already have an accepted partnership
     NOT EXISTS (
       SELECT 1 FROM partner_relationships
       WHERE (user_id = auth.uid() OR partner_id = auth.uid())
@@ -76,68 +73,59 @@ CREATE POLICY "Users can create partnerships" ON partner_relationships
     )
   );
 
--- Users can update their partnership status
 CREATE POLICY "Users can update own partnerships" ON partner_relationships
-  FOR UPDATE USING (
-    auth.uid() = user_id OR auth.uid() = partner_id
-  );
+  FOR UPDATE USING (auth.uid() = user_id OR auth.uid() = partner_id);
 
--- Users can delete their partnerships
 CREATE POLICY "Users can delete own partnerships" ON partner_relationships
-  FOR DELETE USING (
-    auth.uid() = user_id OR auth.uid() = partner_id
-  );
+  FOR DELETE USING (auth.uid() = user_id OR auth.uid() = partner_id);
 
--- RLS Policies for moments
-ALTER TABLE moments ENABLE ROW LEVEL SECURITY;
-
--- Users can view their own moments
+-- Policies for moments
 CREATE POLICY "Users can view own moments" ON moments
-  FOR SELECT USING (
-    auth.uid() = user_id
-  );
+  FOR SELECT USING (auth.uid() = user_id);
 
--- Partners can view each other's moments
 CREATE POLICY "Partners can view partner moments" ON moments
-  FOR SELECT USING (
-    are_partners(auth.uid(), user_id)
-  );
+  FOR SELECT USING (are_partners(auth.uid(), user_id));
 
--- Users can create their own moments
 CREATE POLICY "Users can create own moments" ON moments
-  FOR INSERT WITH CHECK (
-    auth.uid() = user_id
-  );
+  FOR INSERT WITH CHECK (auth.uid() = user_id);
 
--- Users can update their own moments
 CREATE POLICY "Users can update own moments" ON moments
-  FOR UPDATE USING (
-    auth.uid() = user_id
-  );
+  FOR UPDATE USING (auth.uid() = user_id);
 
--- Partners can update reactions on partner's moments
-CREATE POLICY "Partners can react to moments" ON moments
-  FOR UPDATE USING (
-    are_partners(auth.uid(), user_id)
-  )
-  WITH CHECK (
-    -- Only allow updating reaction fields
-    (NEW.reaction IS DISTINCT FROM OLD.reaction OR 
-     NEW.reacted_at IS DISTINCT FROM OLD.reacted_at) AND
-    NEW.event = OLD.event AND
-    NEW.note IS NOT DISTINCT FROM OLD.note AND
-    NEW.moment_time = OLD.moment_time AND
-    NEW.timezone = OLD.timezone AND
-    NEW.user_id = OLD.user_id
-  );
+CREATE POLICY "Partners can react to partner moments" ON moments
+  FOR UPDATE USING (are_partners(auth.uid(), user_id));
 
--- Users can delete their own moments
 CREATE POLICY "Users can delete own moments" ON moments
-  FOR DELETE USING (
-    auth.uid() = user_id
-  );
+  FOR DELETE USING (auth.uid() = user_id);
 
--- Function to generate unique invitation code
+-- Trigger to enforce that partners only update reaction/ reacted_at
+CREATE OR REPLACE FUNCTION restrict_partner_updates()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF NOT are_partners(auth.uid(), OLD.user_id) THEN
+    RETURN NEW; -- Not a partner, do nothing
+  END IF;
+
+  -- Only allow reaction/ reacted_at to change
+  IF (NEW.event IS DISTINCT FROM OLD.event OR
+      NEW.note IS DISTINCT FROM OLD.note OR
+      NEW.moment_time IS DISTINCT FROM OLD.moment_time OR
+      NEW.timezone IS DISTINCT FROM OLD.timezone OR
+      NEW.user_id IS DISTINCT FROM OLD.user_id) THEN
+    RAISE EXCEPTION 'Partners can only update reaction or reacted_at';
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_restrict_partner_updates
+  BEFORE UPDATE ON moments
+  FOR EACH ROW
+  WHEN (are_partners(auth.uid(), OLD.user_id))
+  EXECUTE FUNCTION restrict_partner_updates();
+
+-- Function to generate invitation code
 CREATE OR REPLACE FUNCTION generate_invitation_code()
 RETURNS TEXT AS $$
 DECLARE
@@ -145,15 +133,9 @@ DECLARE
   exists_check BOOLEAN;
 BEGIN
   LOOP
-    -- Generate 6 character alphanumeric code
     code := UPPER(SUBSTRING(MD5(RANDOM()::TEXT) FROM 1 FOR 6));
-    
-    -- Check if code already exists
-    SELECT EXISTS(
-      SELECT 1 FROM partner_relationships WHERE invitation_code = code
-    ) INTO exists_check;
-    
-    -- If code doesn't exist, we can use it
+    SELECT EXISTS(SELECT 1 FROM partner_relationships WHERE invitation_code = code)
+      INTO exists_check;
     IF NOT exists_check THEN
       RETURN code;
     END IF;
@@ -161,7 +143,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Trigger to auto-generate invitation code
+-- Trigger to set invitation code
 CREATE OR REPLACE FUNCTION set_invitation_code()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -177,7 +159,7 @@ CREATE TRIGGER partner_relationships_invitation_code
   FOR EACH ROW
   EXECUTE FUNCTION set_invitation_code();
 
--- Trigger to update updated_at timestamp
+-- Trigger to update updated_at column
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
 BEGIN

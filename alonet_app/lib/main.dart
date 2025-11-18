@@ -5,8 +5,10 @@ import 'screens/inbox_screen.dart';
 import 'screens/profile_screen.dart';
 import 'screens/auth/login_screen.dart';
 import 'services/auth_service.dart';
+import 'services/partner_service.dart';
+import 'services/moment_service.dart';
 import 'widgets/nav_icon.dart';
-// import 'screens/no_partner_screen.dart';
+import 'screens/no_partner_screen.dart';
 import 'screens/timeline_screen.dart';
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
@@ -22,8 +24,12 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider(
-      create: (context) => AuthService(),
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (context) => AuthService()),
+        ChangeNotifierProvider(create: (context) => PartnerService()),
+        ChangeNotifierProvider(create: (context) => MomentService()),
+      ],
       child: MaterialApp(
         title: 'Alonet App',
         theme: ThemeColors.lightTheme,
@@ -47,9 +53,19 @@ class _AuthWrapperState extends State<AuthWrapper> {
   @override
   void initState() {
     super.initState();
-    // Initialize auth service when app starts
+    // Initialize services when app starts
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      Provider.of<AuthService>(context, listen: false).initialize();
+      final authService = Provider.of<AuthService>(context, listen: false);
+      final partnerService = Provider.of<PartnerService>(context, listen: false);
+      final momentService = Provider.of<MomentService>(context, listen: false);
+
+      authService.initialize().then((_) {
+        // Once auth is initialized, load partner and moments if authenticated
+        if (authService.isAuthenticated) {
+          partnerService.getCurrentPartner();
+          momentService.getMomentsForDate(DateTime.now());
+        }
+      });
     });
   }
 
@@ -85,12 +101,6 @@ class MainScreen extends StatefulWidget {
 class _MainScreenState extends State<MainScreen> {
   int _currentIndex = 0;
 
-  final List<Widget> _screens = [
-    const TimelineScreen(),
-    const InboxScreen(),
-    const ProfileScreen(),
-  ];
-
   @override
   void initState() {
     super.initState();
@@ -98,11 +108,37 @@ class _MainScreenState extends State<MainScreen> {
 
   @override
   Widget build(BuildContext context) {
+    return Consumer<PartnerService>(
+      builder: (context, partnerService, child) {
+        // Show loading screen while checking partner status
+        if (partnerService.isLoading && partnerService.currentPartner == null) {
+          return const Scaffold(
+            body: Center(
+              child: CircularProgressIndicator(),
+            ),
+          );
+        }
+
+        // Show NoPartnerScreen if user doesn't have a partner
+        if (!partnerService.hasPartner) {
+          return const NoPartnerScreen();
+        }
+
+        // Show main app with navigation
+        return _buildMainApp(context);
+      },
+    );
+  }
+
+  Widget _buildMainApp(BuildContext context) {
+    final List<Widget> screens = [
+      const TimelineScreen(),
+      const InboxScreen(),
+      const ProfileScreen(),
+    ];
+
     return Scaffold(
-      // appBar: AppBar(
-      //   title: Text(_titles[_currentIndex]),
-      // ),
-      body: _screens[_currentIndex],
+      body: screens[_currentIndex],
       bottomNavigationBar: Container(
         decoration: BoxDecoration(
           color: Colors.white,
